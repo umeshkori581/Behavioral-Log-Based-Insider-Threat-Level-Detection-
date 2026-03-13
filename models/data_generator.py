@@ -24,6 +24,12 @@ def _rand_time(base, hours_back=48):
 
 
 class DataGenerator:
+    # 🔴🔴🔴 CHANGE 1: CONSTRUCTOR ADD KARO 🔴🔴🔴
+    def __init__(self, tracker=None):
+        """Initialize DataGenerator with optional RealTimeTracker"""
+        self.tracker = tracker
+        print("✅ DataGenerator initialized with tracker" if tracker else "⚠️ DataGenerator initialized without tracker")
+    
     def seed_demo_data(self, conn):
         c = conn.cursor()
         now = datetime.now()
@@ -61,13 +67,36 @@ class DataGenerator:
                 ts = (now - timedelta(
                     hours=random.randint(0, 168),
                     minutes=random.randint(0, 59))
-                ).replace(hour=hour).strftime("%Y-%m-%d %H:%M:%S")
+                ).replace(hour=hour)
+                
                 status = "suspicious" if files_n > 150 or hour < 6 else "normal"
                 ip = random.choice(profile["ips"])
+                
+                # Format timestamp for SQL
+                ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # 🔴🔴🔴 EXISTING CODE - activity_logs table mein insert 🔴🔴🔴
                 c.execute("""INSERT INTO activity_logs
                     (user_id,action,resource,ip_address,status,files_accessed,timestamp)
                     VALUES (?,?,?,?,?,?,?)""",
-                    (uid, action, random.choice(FILES), ip, status, files_n, ts))
+                    (uid, action, random.choice(FILES), ip, status, files_n, ts_str))
+                
+                # 🔴🔴🔴 CHANGE 2: UserActivity table mein bhi insert karo 🔴🔴🔴
+                # Ye tab kaam karega jab RealTimeTracker initialize ho
+                if hasattr(self, 'tracker') and self.tracker:
+                    try:
+                        self.tracker.track_activity(
+                            user_id=uid,
+                            username=uid,  # username same as user_id for demo
+                            action=action,
+                            resource=random.choice(FILES),
+                            ip_address=ip,
+                            status=status,
+                            files_accessed=files_n
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Error tracking activity in data_generator for user {uid}: {e}")
+                # 🔴🔴🔴 CHANGE 2 END 🔴🔴🔴
 
         # Normal users
         normal_profile = {"events": 40, "files_range": (5, 80),
@@ -87,11 +116,27 @@ class DataGenerator:
 
         # Failed logins for EMP_005
         for _ in range(12):
+            ts_str = _rand_time(now, 24)
             c.execute("""INSERT INTO activity_logs
                 (user_id,action,resource,ip_address,status,files_accessed,timestamp)
                 VALUES (?,?,?,?,?,?,?)""",
                 ("EMP_005", "LOGIN_FAILED", "system", "185.220.x.x",
-                 "failed", 0, _rand_time(now, 24)))
+                 "failed", 0, ts_str))
+            
+            # 🔴🔴🔴 Failed login ko bhi UserActivity mein track karo 🔴🔴🔴
+            if hasattr(self, 'tracker') and self.tracker:
+                try:
+                    self.tracker.track_activity(
+                        user_id="EMP_005",
+                        username="EMP_005",
+                        action="LOGIN_FAILED",
+                        resource="system",
+                        ip_address="185.220.x.x",
+                        status="failed",
+                        files_accessed=0
+                    )
+                except Exception as e:
+                    print(f"⚠️ Error tracking failed login: {e}")
 
         # ── Risk scores ───────────────────────────────────
         risk_data = [
@@ -127,4 +172,4 @@ class DataGenerator:
                 (uid, atype, sev, msg, det))
 
         conn.commit()
-
+        print("✅ Demo data seeded successfully!")

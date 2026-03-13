@@ -1,6 +1,3 @@
-User dashboard · HTML
-Copy
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -66,6 +63,32 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);display:flex;m
 .kv.yellow{color:var(--warn);}
 .kv.red{color:var(--danger);}
 .ks{font-size:0.72rem;color:var(--m);margin-top:4px;}
+ 
+/* 🔴🔴🔴 NEW - ACTIVITY FEED STYLES 🔴🔴🔴 */
+.activity-feed {
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 10px;
+}
+.activity-item {
+    transition: all 0.3s ease;
+    margin-bottom: 8px;
+}
+.activity-item:hover {
+    transform: translateX(5px);
+}
+.badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+.bg-success { background-color: var(--safe); color: white; }
+.bg-warning { background-color: var(--warn); color: black; }
+.bg-danger { background-color: var(--danger); color: white; }
+.bg-primary { background-color: var(--ac); color: white; }
+.alert { border-radius: 8px; padding: 12px; }
+/* 🔴🔴🔴 END ACTIVITY FEED STYLES 🔴🔴🔴 */
  
 /* RISK GAUGE CARD */
 .risk-card{background:var(--s1);border:1px solid var(--b);border-radius:14px;padding:22px;display:grid;grid-template-columns:1fr 160px;gap:20px;align-items:center;}
@@ -210,6 +233,38 @@ tr:hover td{background:rgba(255,255,255,0.015);}
         <div class="ks">Reference working set</div>
       </div>
     </div>
+
+    <!-- 🔴🔴🔴 NEW - REAL-TIME ACTIVITY FEED 🔴🔴🔴 -->
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header" style="background: var(--ac); padding: 15px 20px; border-radius: 13px 13px 0 0;">
+                    <h5 style="color: white; margin: 0; display: flex; align-items: center; gap: 10px;">
+                        <span>🕐 Real-Time Activity Feed</span>
+                        <span style="font-size: 0.7rem; background: rgba(255,255,255,0.2); padding: 3px 8px; border-radius: 12px;" id="activityCount">0</span>
+                    </h5>
+                </div>
+                <div class="card-body" style="padding: 0;">
+                    <div class="activity-feed" id="activityFeed" style="max-height: 400px; overflow-y: auto; padding: 15px;">
+                        <!-- Activities will be loaded here via AJAX -->
+                        <div class="text-center" id="loadingSpinner">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="sr-only">Loading...</span>
+                            </div>
+                            <p style="color: var(--m); margin-top: 10px;">Loading activities...</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer" style="background: var(--s2); padding: 8px 15px; border-top: 1px solid var(--b);">
+                    <small style="color: var(--m);">
+                        <span>🔄 Auto-refreshes every 10 seconds</span>
+                        <span style="float: right;" id="lastUpdate">Just now</span>
+                    </small>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- 🔴🔴🔴 END ACTIVITY FEED 🔴🔴🔴 -->
  
     <!-- RISK CARD + GAUGE -->
     {% set score = risk.score if risk else 0 %}
@@ -384,7 +439,75 @@ function simulate(type){
     setTimeout(()=>{el.style.display='none';},4000);
   });
 }
+
+// 🔴🔴🔴 NEW - REAL-TIME ACTIVITY FEED JAVASCRIPT 🔴🔴🔴
+function loadActivities() {
+    fetch('/api/my-activities')
+        .then(response => response.json())
+        .then(activities => {
+            let html = '';
+            const feed = document.getElementById('activityFeed');
+            const spinner = document.getElementById('loadingSpinner');
+            
+            if (spinner) spinner.style.display = 'none';
+            
+            if (activities.length === 0) {
+                html = '<div style="text-align: center; padding: 30px; color: var(--m);">No activities yet. Login to see your activity feed.</div>';
+            } else {
+                activities.forEach(act => {
+                    let riskClass = 'success';
+                    let bgColor = 'var(--safe)';
+                    
+                    if (act.risk_score > 0.7) {
+                        riskClass = 'danger';
+                        bgColor = 'var(--danger)';
+                    } else if (act.risk_score > 0.4) {
+                        riskClass = 'warning';
+                        bgColor = 'var(--warn)';
+                    }
+                    
+                    let time = new Date(act.timestamp).toLocaleTimeString();
+                    let action = act.action || 'Unknown';
+                    let resource = act.resource || '-';
+                    let riskPercent = Math.round(act.risk_score * 100);
+                    
+                    html += `
+                        <div class="alert alert-${riskClass}" style="background: var(--s2); border-left: 4px solid ${bgColor}; margin-bottom: 10px; padding: 12px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                    <span style="font-family: var(--fm); color: var(--text);"><strong>${time}</strong></span>
+                                    <span style="color: ${bgColor};">${action}</span>
+                                    <span style="color: var(--m);">${resource}</span>
+                                </div>
+                                <span style="background: ${bgColor}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.7rem;">
+                                    Risk: ${riskPercent}%
+                                </span>
+                            </div>
+                            <div style="margin-top: 5px; font-size: 0.7rem; color: var(--m);">
+                                IP: ${act.ip_address || 'Unknown'} | Type: ${act.activity_type || 'activity'}
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            
+            feed.innerHTML = html;
+            document.getElementById('activityCount').textContent = activities.length;
+            document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        })
+        .catch(error => {
+            console.error('Error loading activities:', error);
+            document.getElementById('activityFeed').innerHTML = 
+                '<div style="text-align: center; padding: 30px; color: var(--danger);">Error loading activities. Please refresh the page.</div>';
+        });
+}
+
+// Load activities immediately and then every 10 seconds
+document.addEventListener('DOMContentLoaded', function() {
+    loadActivities();
+    setInterval(loadActivities, 10000);
+});
+// 🔴🔴🔴 END REAL-TIME ACTIVITY FEED JAVASCRIPT 🔴🔴🔴
 </script>
 </body>
 </html>
- 

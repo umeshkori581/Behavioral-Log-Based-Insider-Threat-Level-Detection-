@@ -2,16 +2,40 @@
 Insider Threat Level Detection System — Behavioral Log-Based Insider Threat Detection
 Flask Backend Application
 """
-
-from flask import Flask, render_template, jsonify, request, redirect, url_for, session
-import sqlite3, json, random, hashlib
-from datetime import datetime, timedelta
+# Database and models
+from models import db, UserActivity
+from models.risk_engine import RealTimeTracker, RiskEngine, AlertManager
 from models.anomaly_detector import AnomalyDetector
-from models.risk_engine import RiskEngine, AlertManager
 from models.data_generator import DataGenerator
- 
+
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session, send_file
+import sqlite3, json, random, hashlib, os
+from datetime import datetime, timedelta
+import io
+
+# Initialize components
+risk_engine = RiskEngine()
+alert_manager = AlertManager()
+anomaly_detector = AnomalyDetector()
+real_time_tracker = None  # Will initialize after db
+
 app = Flask(__name__)
 app.secret_key = "itds-secret-2024"
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///threatguard.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize database
+db.init_app(app)
+
+# Initialize real-time tracker
+with app.app_context():
+    real_time_tracker = RealTimeTracker(db)
+
+# Create tables
+with app.app_context():
+    db.create_all()
+    print("✅ Database tables created/verified")
  
 # ─── DB INIT ──────────────────────────────────────────────
 def get_db():
@@ -75,6 +99,11 @@ def init_db():
         dg.seed_demo_data(conn)
  
     conn.close()
+
+# ─── HELPER FUNCTIONS ────────────────────────────────────
+def _hash_password(password):
+    """Simple password hashing"""
+    return hashlib.sha256(password.encode()).hexdigest()
  
 # ─── AUTH ROUTES ──────────────────────────────────────────
 @app.route("/")
@@ -86,20 +115,52 @@ def login():
     if request.method == "POST":
         uid = request.form.get("user_id", "").strip()
         pwd = request.form.get("password", "").strip()
-        h = hashlib.sha256(pwd.encode()).hexdigest()
+        h = _hash_password(pwd)
+        
         conn = get_db()
         user = conn.execute(
             "SELECT * FROM users WHERE user_id=? AND password_hash=?", (uid, h)
         ).fetchone()
         conn.close()
+        
         if user:
+            # Track successful login
+            if real_time_tracker:
+                try:
+                    result = real_time_tracker.track_activity(
+                        user_id=user["user_id"],
+                        username=user["name"],
+                        action="LOGIN_SUCCESS",
+                        status="normal",
+                        ip_address=request.remote_addr
+                    )
+                    print(f"✅ Login tracked - Risk: {result['risk_score']}")
+                except Exception as e:
+                    print(f"⚠️ Tracking error: {e}")
+            
             session["user_id"] = user["user_id"]
             session["is_admin"] = bool(user["is_admin"])
             session["name"] = user["name"]
+            
             if user["is_admin"]:
                 return redirect(url_for("admin_dashboard"))
             return redirect(url_for("user_dashboard"))
-        return render_template("login.html", error="Invalid credentials")
+        else:
+            # Track failed login
+            if real_time_tracker:
+                try:
+                    real_time_tracker.track_activity(
+                        user_id=uid,
+                        username=uid,
+                        action="LOGIN_FAILED",
+                        status="failed",
+                        ip_address=request.remote_addr
+                    )
+                except Exception as e:
+                    print(f"⚠️ Tracking error: {e}")
+            
+            return render_template("login.html", error="Invalid credentials")
+    
     return render_template("login.html")
  
 @app.route("/logout")
@@ -112,6 +173,7 @@ def logout():
 def user_dashboard():
     if not session.get("user_id"):
         return redirect(url_for("login"))
+    
     uid = session["user_id"]
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -125,14 +187,19 @@ def user_dashboard():
         "SELECT * FROM alerts WHERE user_id=? AND acknowledged=0 ORDER BY created_at DESC LIMIT 5", (uid,)
     ).fetchall()
     conn.close()
-    return render_template("user_dashboard.html", user=user, risk=risk,
-                           recent_logs=recent_logs, my_alerts=my_alerts)
+    
+    return render_template("user_dashboard.html", 
+                           user=user, 
+                           risk=risk,
+                           recent_logs=recent_logs, 
+                           my_alerts=my_alerts)
  
 # ─── ADMIN DASHBOARD ──────────────────────────────────────
 @app.route("/admin")
 def admin_dashboard():
     if not session.get("is_admin"):
         return redirect(url_for("login"))
+    
     conn = get_db()
     all_users = conn.execute("SELECT * FROM users WHERE is_admin=0").fetchall()
     alerts = conn.execute(
@@ -146,10 +213,26 @@ def admin_dashboard():
         ORDER BY r.score DESC
     """).fetchall()
     conn.close()
-    return render_template("admin_dashboard.html", all_users=all_users,
-                           alerts=alerts, high_risk=high_risk)
+    
+    return render_template("admin_dashboard.html", 
+                           all_users=all_users,
+                           alerts=alerts, 
+                           high_risk=high_risk)
  
 # ─── API ENDPOINTS ────────────────────────────────────────
+
+# 🔴🔴🔴 NEW - Real-time activity feed API 🔴🔴🔴
+@app.route('/api/my-activities')
+def my_activities():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Not logged in'}), 401
+    
+    if real_time_tracker:
+        activities = real_time_tracker.get_user_activity_feed(user_id, limit=20)
+        return jsonify(activities)
+    return jsonify([])
+
 @app.route("/api/run-detection", methods=["POST"])
 def run_detection():
     """Trigger anomaly detection on all users"""
@@ -254,8 +337,10 @@ def api_stats():
     total_events = conn.execute("SELECT COUNT(*) FROM activity_logs").fetchone()[0]
     conn.close()
     return jsonify({
-        "total_users": total_users, "high_risk": high_risk,
-        "medium_risk": med_risk, "unacked_alerts": unacked,
+        "total_users": total_users, 
+        "high_risk": high_risk,
+        "medium_risk": med_risk, 
+        "unacked_alerts": unacked,
         "total_events": total_events
     })
  
@@ -272,31 +357,62 @@ def simulate_event(uid):
             "INSERT INTO activity_logs (user_id,action,resource,ip_address,status,files_accessed,timestamp) VALUES (?,?,?,?,?,?,?)",
             (uid, "BULK_FILE_ACCESS", "/sensitive/payroll/*", "10.0.0.99", "suspicious", files, now)
         )
+        
+        # Also track in UserActivity
+        if real_time_tracker:
+            real_time_tracker.track_activity(
+                user_id=uid,
+                username=uid,
+                action="BULK_FILE_ACCESS",
+                resource="/sensitive/payroll/*",
+                ip_address="10.0.0.99",
+                status="suspicious",
+                files_accessed=files
+            )
+            
     elif event_type == "off_hours":
         conn.execute(
             "INSERT INTO activity_logs (user_id,action,resource,ip_address,status,files_accessed,timestamp) VALUES (?,?,?,?,?,?,?)",
-            (uid, "LOGIN", "system", "unknown_ip", "suspicious", 0, "2024-01-15 02:30:00")
+            (uid, "LOGIN", "system", "unknown_ip", "suspicious", 0, now)
         )
+        
+        if real_time_tracker:
+            real_time_tracker.track_activity(
+                user_id=uid,
+                username=uid,
+                action="OFF_HOURS_LOGIN",
+                resource="system",
+                ip_address="unknown_ip",
+                status="suspicious",
+                files_accessed=0
+            )
+            
     elif event_type == "failed_login":
         for i in range(12):
             conn.execute(
                 "INSERT INTO activity_logs (user_id,action,resource,ip_address,status,files_accessed,timestamp) VALUES (?,?,?,?,?,?,?)",
                 (uid, "LOGIN_FAILED", "system", "185.x.x.x", "failed", 0, now)
             )
+            
+            if real_time_tracker and i == 0:  # Track only once to avoid spam
+                real_time_tracker.track_activity(
+                    user_id=uid,
+                    username=uid,
+                    action="LOGIN_FAILED",
+                    resource="system",
+                    ip_address="185.x.x.x",
+                    status="failed",
+                    files_accessed=0
+                )
+    
     conn.commit()
     conn.close()
     return jsonify({"status": "simulated", "type": event_type})
- 
-if __name__ == "__main__":
-    init_db()
-    app.run(debug=True, port=5000)
- 
- 
+
 # ─── LANDING PAGE ─────────────────────────────────────────
 @app.route("/landing")
 def landing():
     return render_template("landing.html")
- 
  
 # ─── AUDIT LOGS PAGE ──────────────────────────────────────
 @app.route("/audit-logs")
@@ -304,7 +420,6 @@ def audit_logs():
     if not session.get("is_admin"):
         return redirect(url_for("login"))
     return render_template("audit_logs.html")
- 
  
 @app.route("/api/all-logs")
 def api_all_logs():
@@ -317,7 +432,6 @@ def api_all_logs():
     conn.close()
     return jsonify([dict(r) for r in logs])
  
- 
 # ─── PDF REPORT ───────────────────────────────────────────
 @app.route("/api/report/<uid>")
 def api_report(uid):
@@ -325,8 +439,6 @@ def api_report(uid):
         return redirect(url_for("login"))
     try:
         from models.pdf_reporter import generate_report
-        from flask import send_file
-        import io as _io
         conn = get_db()
         user   = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         risk   = conn.execute(
@@ -339,18 +451,26 @@ def api_report(uid):
             "SELECT * FROM alerts WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
         ).fetchall()
         conn.close()
+        
         pdf_bytes = generate_report(
             user=dict(user) if user else {},
             risk=dict(risk) if risk else {},
             logs=[dict(r) for r in logs],
             alerts=[dict(r) for r in alerts],
         )
-        buf = _io.BytesIO(pdf_bytes)
+        buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
-        return send_file(buf, mimetype="application/pdf", as_attachment=True,
-            download_name=f"threatguard_{uid}_{datetime.now().strftime('%Y%m%d')}.pdf")
+        return send_file(
+            buf, 
+            mimetype="application/pdf", 
+            as_attachment=True,
+            download_name=f"threatguard_{uid}_{datetime.now().strftime('%Y%m%d')}.pdf"
+        )
     except ImportError:
         return jsonify({"error": "Run: pip install reportlab"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
  
+if __name__ == "__main__":
+    init_db()
+    app.run(debug=True, port=5000)
